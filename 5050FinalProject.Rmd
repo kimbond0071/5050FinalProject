@@ -1,0 +1,891 @@
+---
+title: "Logistic Regression Analyisis of Binge Drinking"
+author: "Kimberly Bond"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+output:
+  pdf_document:
+    toc: true
+    number_sections: false
+    fig_caption: true
+    
+  html_document:
+    toc: true
+    df_print: paged
+fontsize: 11pt
+geometry: margin=1in
+header-includes:
+  - \usepackage{booktabs}
+  - \setlength{\parindent}{1.5em}
+  - \setlength{\parskip}{0pt}
+---
+
+\newpage
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo       = FALSE,
+  message    = FALSE,
+  warning    = FALSE,
+  fig.align  = "center",
+  fig.width  = 6,
+  fig.height = 4
+)
+```
+
+```{r, include=FALSE}
+
+library(tidyverse)
+library(janitor)
+library(skimr)
+library(scales)
+library(MASS)
+library(survey)
+
+# Load the data
+load("~/Desktop/NSDUH_2024.RData")
+nsduh <- NSDUH_2024   
+```
+
+```{r data cleaning, echo=FALSE}
+miss_codes <- c(85, 94, 97, 98, 99, ".")
+fix_missing <- function(x) ifelse(x %in% miss_codes, NA, x)
+
+nsduh2 <- nsduh |>
+  filter(CATAG3 != 1) |> 
+  mutate(
+    across(
+      c(IRSEX, CATAG3, HEALTH, IREDUHIGHST2, INCOME,
+        IRWRKSTAT18, NICVAPMON, TOBVNICMON, MRJMON,
+        AMDEYR, ALCMON, BNGDRKMON, HVYDRKMON, VEREP, VESTR_C, ANALWT2_C),
+      fix_missing
+    ),
+    
+    # Factors
+    sex     = factor(IRSEX, labels = c("Male", "Female")),
+    age_cat = factor(CATAG3, labels = c("18–25","26-34","35-49","50+"), ordered = TRUE),
+    health  = factor(HEALTH, labels = c("Excellent","Very good","Good","Fair","Poor"), ordered = TRUE),
+    educ    = factor(IREDUHIGHST2, ordered = TRUE),
+    income  = factor(INCOME, labels = c("<$20k", "$20–49k", "$50–74k", ">$75k"), ordered = TRUE),
+    
+    work_status = factor(IRWRKSTAT18,
+                         labels = c("Full-time","Part-time","Unemployed","Other")),
+    
+    vape_use = factor(NICVAPMON, labels = c("No","Yes")),
+    tob_use  = factor(TOBVNICMON, labels = c("No","Yes")),
+    mj_use   = factor(MRJMON, labels = c("No","Yes")),
+    
+    mde_adult = factor(AMDEYR, labels = c("Yes","No")),
+    
+    alc_use  = factor(ALCMON, labels = c("No","Yes")),
+    binge    = factor(BNGDRKMON, labels = c("No","Yes")),
+    heavy    = factor(HVYDRKMON, labels = c("No","Yes"))
+  )
+
+nsduh2 <- nsduh2 %>% 
+       dplyr::select(sex, age_cat, health, educ, income, work_status,
+              vape_use, tob_use, mj_use, mde_adult,
+              alc_use, binge, heavy, VEREP, VESTR_C, ANALWT2_C)
+
+## Some EDA
+
+# Overall prevalence of heavy binge drinking (past month)
+heavy_dist <- nsduh2 %>%
+  filter(!is.na(heavy)) %>%
+  count(heavy) %>%
+  mutate(
+    prop = n / sum(n),
+    prop_pct = scales::percent(prop, accuracy = 0.1)
+  )
+
+tab_heavy_by <- function(data, var) {
+  data %>%
+    filter(!is.na(heavy), !is.na({{ var }})) %>%
+    count({{ var }}, heavy) %>%
+    group_by({{ var }}) %>%
+    mutate(
+      prop = n / sum(n),
+      prop_pct = scales::percent(prop, accuracy = 0.1)
+    ) %>%
+    ungroup()
+}
+
+```
+
+# Summary
+Identifying factors that encourage or discourage heavy binge drinking could lead to a better understanding of who is most susceptible to frequent binge drinking, which is often a significant indicator of alcoholism. The particular factors of interest for their possible impact on frequent binge drinking include biological sex, age, general health, mental health, education, income, employment status, vaping use, tobacco and nicotine use, and marijuana use. By analyzing the Substance Abuse and Mental Health Services Administration’s (SAMHSA) National Survey on Drug Use and Health (NSDUH) [Citation 1], a data set containing 47,273 observations, a survey-weighted logistic regression model and a survey-weighted cross-validated lasso logistic regression model were fit. These models found that heavy alcohol use was most strongly associated with co-occurring substance use. Tobacco users had over three times the odds of heavy drinking, and marijuana users had more than twice the odds, compared to non-users. Females and individuals in the “other” work-status category had significantly lower odds of heavy drinking, as did those reporting poorer overall health. Income, education, vaping, and past-year major depression were not significant predictors after adjustment. Overall, substance-use behaviors were the dominant factors associated with heavy alcohol consumption in the model.
+
+# Introduction
+
+Finding factors related to substance abuse has long been a key area of interest, and the study of which is now much more feasible thanks to extensive surveys and datasets like SAMHSA’s NSDUH. In their research, *Logistic Regression Model of Demographic Predictors and Confounders of Binge Alcohol Use Among Adults with Major Depression* [Citation 2], Areen Omari focuses on identifying demographic factors that increase the likelihood of alcohol abuse among adults with a lifelong history of major depressive episodes. Their analysis of the NSDUH dataset found that age and marital status significantly predicted binge drinking among individuals with major depressive episodes. Additionally, they found that adults under the age of 50, with a college degree, never married, divorced/separated, and with a high-middle income level or higher, were at higher risk for binge alcohol use. While this information is incredibly useful for identifying individuals who may be susceptible to frequent binge drinking and thus alcohol abuse based on demographics, further information could be gained regarding adults who participate often in binge drinking and their patterns of use with other substances and other variables. Thus, the main factors of interest in this analysis will be biological sex, age, general health, mental health, education, income, employment status, vaping use, tobacco and nicotine use, and marijuana use.
+
+From initial analysis, 5.03\% of the adult survey respondents participated in heavy binge drinking in the past month (2,950 adults). Age groups 18--25 and 35--49 have much higher binge drinking occurrence in the past month compared to age groups 26--34 and 50 or more years old. Additionally, 55.9\% of binge drinkers were male versus female. In terms of other substance use, 35\% of binge drinkers also vaped, 60.7\% used any type of tobacco or nicotine, and 43.9\% used marijuana in the past month. For health, 14.9\% of binge drinkers had a major depressive episode in the past year, and the majority of heavy binge drinkers qualified themselves as very good or good health. Lastly, 44.6\% of those who participated in heavy binge drinking had an annual income greater than \$75,000 per year, and 58.6\% had full-time employment. Key patterns are shown in the exploratory analysis plots (Figure~\ref{fig:heavy-exploratory}A--C). This study aims to gain further insight into these observations by exploring the predictive capabilities of the described predictors and examining the association between increased probability of heavy binge drinking and their presence.
+
+```{r heavy-exploratory, echo=FALSE, fig.cap = 'Proportion of heavy binge drinkers by (A) age group, (B) sex, and (C) nicotine use in the past month.', fig.align = 'center', fig.width = 10, fig.height = 3.5, out.width = '\\textwidth'}
+library(dplyr)
+library(ggplot2)
+library(patchwork)
+library(scales)
+
+heavy_only <- nsduh2 %>% filter(heavy == "Yes")
+
+p_age <- heavy_only %>%
+  group_by(age_cat) %>%
+  summarise(n = n()) %>%
+  mutate(prop = n / sum(n)) %>%
+  ggplot(aes(x = age_cat, y = prop)) +
+  geom_col(fill = "darkgray") +
+  geom_text(aes(label = percent(prop, accuracy = 0.1)),
+            vjust = -0.5, size = 3.5) +
+  scale_y_continuous(labels = percent_format()) +
+  labs(
+    title = "Age group",
+    x = "Age group",
+    y = "Percentage of heavy binge drinkers"
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5))
+
+p_sex <- heavy_only %>%
+  group_by(sex) %>%
+  summarise(n = n()) %>%
+  mutate(prop = n / sum(n)) %>%
+  ggplot(aes(x = sex, y = prop)) +
+  geom_col(fill = "darkgray") +
+  geom_text(aes(label = percent(prop, accuracy = 0.1)),
+            vjust = -0.5, size = 3.5) +
+  scale_y_continuous(labels = percent_format()) +
+  labs(
+    title = "Sex",
+    x = "Sex",
+    y = "Percentage of heavy binge drinkers"
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5))
+
+p_tob <- heavy_only %>%
+  group_by(tob_use) %>%
+  summarise(n = n()) %>%
+  mutate(prop = n / sum(n)) %>%
+  ggplot(aes(x = tob_use, y = prop)) +
+  geom_col(fill = "darkgray") +
+  geom_text(aes(label = percent(prop, accuracy = 0.1)),
+            vjust = -0.5, size = 3.5) +
+  scale_y_continuous(labels = percent_format()) +
+  labs(
+    title = "Nicotine use (past month)",
+    x = "Nicotine use",
+    y = "Percentage of heavy binge drinkers"
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5))
+
+# Combine in one row and add panel labels A, B, C
+(p_age | p_sex | p_tob) +
+  plot_annotation(tag_levels = "A")
+  
+```
+
+# Methods
+
+## Data Source and Description
+
+The analytic sample was drawn from the National Survey on Drug Use and Health (NSDUH) and included demographic, socioeconomic, behavioral, and mental-health indicators relevant to substance-use risk. Age was categorized into five groups: 12–17 (n = 11,334; 19.33%), 18–25 (n = 14,136; 24.11%), 26–34 (n = 9,621; 16.41%), 35–49 (n = 12,845; 21.91%), and 50+ (n = 10,697; 18.24%). Note that individuals under 18 were excluded from the analysis to be consistent with the focus on adults. Sex was recorded using the IRSEX classification. Self-reported overall health ranged from excellent to poor: Excellent (12,453; 21.24%), Very Good (21,501; 36.67%), Good (17,813; 30.38%), Fair (5,902; 10.07%), and Poor (930; 1.59%). Educational attainment (IREDUHIGHST2) spanned from less than fifth grade to college graduate or higher, with the largest groups being high-school graduates or GED holders (13,004; 22.18%), those with some college but no degree (9,379; 16.00%), and college graduates or higher (15,963; 27.23%). Annual household income was grouped into four levels: Less than \$20,000 (9,443; 16.11%), \$20,000–49,999 (14,956; 25.51%), \$50,000–74,999 (8,829; 15.06%), and \$75,000 or more (25,405; 43.33%). Employment status among respondents aged 18+ included full-time employment (22,901; 39.06%), part-time employment (7,159; 12.21%), unemployment (3,108; 5.30%), and other/non-labor-force status (14,131; 24.10%), while youth aged 12–17 were coded as missing.
+
+Behavioral risk variables captured past-month substance use. Nicotine vaping (NICVAPMON) was reported by 7,542 individuals (12.86%), while 51,091 (87.14%) reported no past-month use. Tobacco or nicotine use from any source (TOBVNICMON) occurred in 13,247 individuals (22.59%), compared with 45,386 non-users (77.41%). Marijuana use in the past month (MRJMON) was endorsed by 9,955 respondents (16.98%), with 48,678 (83.02%) reporting no use. Mental-health indicators included the presence of a major depressive episode in the past year, collected separately for adults (AMDEYR) and youths (YMDEYR). After converting ineligible age groups to NA, 5,003 adults (8.53%) and 1,790 youths (3.05%) met criteria for a depressive episode, while 40,656 adults (69.34%) and 9,127 youths (15.57%) reported none. The primary outcome variable, heavy alcohol use in the past 30 days (HVYDRKMON), was relatively rare, with 2,950 respondents (5.03%) classified as heavy drinkers compared to 55,683 (94.97%) who reported no heavy use. 
+
+## Exploratory Data Analysis
+
+Following the initial identification of the analytic variables of interest from the NSDUH codebook, preliminary data cleaning was conducted, including removal of limited missing values and the recoding of ordered factors. Exploratory data analysis was performed to characterize the distributions of the selected predictors and their bivariate relationships with heavy binge drinking in the past month. Data cleaning, EDA function creation, and general debugging of all code was assisted by GenerativeAI [Citation 3]. These descriptive findings are summarized in the introduction and supported by the visualizations presented therein.
+
+To formally examine the association between each predictor and the binary outcome, a series of bivariate statistical tests were performed. Pearson Chi-Square Tests of Association were used for categorical variables. Additionally, Cochran--Armitage trend tests were used to assess linear trends across ordered categories.
+
+The Chi-Square tests indicated statistically significant associations (p-value < 0.01) between heavy binge drinking and several predictors, including sex, age group, overall health, employment status, past-month vaping, past-month tobacco or nicotine use, past-month marijuana use, and past-year major depressive episode status. Trend tests provided evidence of monotonic trends only for age (p-value = 0.003944) and health (p-value < 0.0001), whereas education and income did not exhibit significant linear trends. A summary of the Chi-Square test results is presented in Table~\ref{tab:chisq-results}.
+
+```{r, include=FALSE}
+chisq_heavy <- function(var) {
+  tab <- table(nsduh2$heavy, var)
+  chisq.test(tab)
+}
+chisq_heavy(nsduh2$sex)
+chisq_heavy(nsduh2$age_cat)
+chisq_heavy(nsduh2$health)
+chisq_heavy(nsduh2$income)
+chisq_heavy(nsduh2$work_status)
+chisq_heavy(nsduh2$vape_use)
+chisq_heavy(nsduh2$tob_use)
+chisq_heavy(nsduh2$mj_use)
+chisq_heavy(nsduh2$mde_adult)
+
+library(DescTools)
+nsduh2 <- nsduh2 %>%
+  mutate(
+    age_ord   = as.ordered(age_cat),
+    health_ord = as.ordered(health),
+    educ_ord  = educ,      # already ordered
+    income_ord = as.ordered(income)
+  )
+CochranArmitageTest(table(nsduh2$heavy, nsduh2$age_ord))
+CochranArmitageTest(table(nsduh2$heavy, nsduh2$health_ord))
+CochranArmitageTest(table(nsduh2$heavy, nsduh2$educ_ord))
+CochranArmitageTest(table(nsduh2$heavy, nsduh2$income_ord))
+```
+
+```{r}
+
+library(broom)
+chisq_vars <- c(
+  "sex","age_cat","health","income","work_status",
+  "vape_use","tob_use","mj_use","mde_adult", "educ"
+)
+
+chisq_results <- purrr::map_df(
+  chisq_vars,
+  ~ {
+    varname <- .x
+    
+    tab <- table(nsduh2$heavy, nsduh2[[varname]])
+    
+    broom::tidy(chisq.test(tab)) %>%
+      mutate(variable = varname)
+  }
+)
+
+chisq_results_clean <- chisq_results %>%
+  dplyr::select(variable, statistic, p.value) %>%
+  mutate(
+    sig = dplyr::case_when(
+      p.value < 0.001 ~ "***",
+      p.value < 0.01  ~ "**",
+      p.value < 0.05  ~ "*",
+      TRUE            ~ ""
+    )
+  )
+```
+
+```{r chisq-table, results="asis"}
+library(knitr)
+kable(
+  chisq_results_clean,
+  format = "latex",
+  booktabs = TRUE,
+  caption = "Chi-Square Tests of Association Between Predictors and Heavy Binge Drinking",
+  label = "chisq-results"
+)
+```
+
+
+# Modeling
+
+```{r, include = FALSE}
+nsduh2 <- nsduh2 %>% 
+  mutate(
+    sex = factor(sex),
+    age_cat = factor(age_cat, ordered = TRUE),
+    health = factor(health, ordered = TRUE), # note that health ordered as E < VG < G < F < P
+    work_status = factor(work_status),
+    vape_use = factor(vape_use),
+    tob_use = factor(tob_use),
+    mj_use = factor(mj_use),
+    mde_adult = factor(mde_adult) 
+  )
+
+vars <- c("heavy", "sex", "age_cat", "health", "work_status",
+          "vape_use", "tob_use", "mj_use", "mde_adult", 
+          "educ", "income", "VEREP", "VESTR_C", "ANALWT2_C")
+
+nsduh_clean <- nsduh2 %>% 
+  dplyr::select(all_of(vars)) %>% 
+  tidyr::drop_na()
+
+
+nsduh_design <- svydesign(
+  ids    = ~VEREP,        # PSU
+  strata = ~VESTR_C,      # Variance stratum
+  weights = ~ANALWT2_C,    # sampling weight
+  nest = TRUE,
+  data = nsduh_clean
+)
+```
+
+```{r, include = FALSE}
+model_full <- svyglm(heavy ~ sex + age_cat + health + work_status +
+                   vape_use + tob_use + mj_use + mde_adult + income + educ,
+                   design = nsduh_design,
+                   family = quasibinomial())
+
+mod_reduced <- svyglm(heavy ~ sex + age_cat + health + work_status +
+                   vape_use + tob_use + mj_use,
+                   design = nsduh_design,
+                   family = quasibinomial())
+mod_nomde <- svyglm(heavy ~ sex + age_cat + health + work_status +
+                   vape_use + tob_use + mj_use + income + educ,
+                   design = nsduh_design,
+                   family = quasibinomial())
+mod_noeduc <- svyglm(heavy ~ sex + age_cat + health + work_status +
+                   vape_use + tob_use + mj_use + income + mde_adult,
+                   design = nsduh_design,
+                   family = quasibinomial())
+mod_noincome <- svyglm(heavy ~ sex + age_cat + health + work_status +
+                   vape_use + tob_use + mj_use + educ + mde_adult,
+                   design = nsduh_design,
+                   family = quasibinomial())
+
+anova_mde <- anova(model_full, mod_nomde)
+anova_educ <- anova(model_full, mod_noeduc)
+anova_income <- anova(model_full, mod_noincome)
+anova_allthree <- anova(model_full, mod_reduced)
+
+model_final <- svyglm(heavy ~ sex + age_cat + health + work_status +
+                   vape_use + tob_use + mj_use,
+                   design = nsduh_design,
+                   family = quasibinomial())
+```
+
+## Model Selection
+
+With a better understanding of the relationships between heavy binge drinking and the predictor variables, a survey-weighted logistic regression model was fit, including all selected predictors and incorporating the survey design variables VEREP (variance primary sampling unit) and VESTR (variance stratum) as recommended for the NSDUH dataset and any large, complex survey data set [Citation 4]. This survey-weighted model adjusts the variance of the estimators such that $Var$($\hat{\beta}$) = $DesignEffect * StandardError^2$. This full model indicated strong overall evidence of association between the predictors and heavy binge drinking, with particularly strong effects for sex, tobacco use, and marijuana use (see Table~\ref{tab:coef-model-full}). Using \texttt{svyglm} with a quasibinomial family, ordinal predictors were modeled using orthogonal polynomial contrasts (linear, quadratic, cubic, and higher-order components). These higher-order terms were used primarily to assess predictive performance; for purposes of inference and interpretation, the focus is on the linear components.
+
+Automated model selection processes, such as step-wise AIC/BIC model selection, could not be used for this model because a lack of assumptions met (weights and stratification are included in the survey-weighted model), so ANOVA was used to reduce the model. An initial ANOVA on the full model showed that MDE_ADULT, INCOME. and EDUC did not add anything to the model. By running subsequent Likelihood Ratio Tests on a reduced model removing each of the variables, it was found each of variables for major depressive episode in the past year, income, and education did not add anything to the model (LRT P-Value for all tests > 0.3), and thus were removed to reduce complexity. The final model coefficients are summarized in Table~\ref{tab:coef-model-full}, and the corresponding model specification can be seen as (not including the survey weighting):
+
+```{r coef-table, results = "asis"}
+library(broom)
+library(dplyr)
+library(knitr)
+
+# Tidy model and create significance stars
+coef_table <- tidy(model_final) %>%
+  # keep only coefficient rows (drop dispersion if present)
+  filter(term != "(Intercept)") %>%
+  mutate(
+    p_value_fmt = format.pval(
+      p.value,
+      digits = 3,
+      eps = 0.0001,
+      scientific = FALSE
+    ),
+    sig = case_when(
+      p.value < 0.001 ~ "***",
+      p.value < 0.01  ~ "**",
+      p.value < 0.05  ~ "*",
+      TRUE            ~ ""
+    )
+  ) %>%
+  dplyr::select(
+    Term        = term,
+    Estimate    = estimate,
+    `Std. Error` = std.error,
+    `p-value`   = p_value_fmt,
+    Sig         = sig
+  )
+
+kable(
+  coef_table,
+  format  = "latex",
+  caption = "Survey-weighted logistic regression coefficients for heavy binge drinking in the past 30 days.",
+  label   = "coef-model-full",
+  booktabs = FALSE  
+)
+```
+
+
+\[
+\begin{aligned}
+\text{logit}\big( P(Y = 1 \mid X) \big)
+= {} & \beta_0 
++ \beta_1 \,\text{sex}_{\text{Female}} \\[4pt]
+& + \beta_2 \,\text{age\_cat.L}
++ \beta_3 \,\text{age\_cat.Q}
++ \beta_4 \,\text{age\_cat.C} \\[4pt]
+& + \beta_5 \,\text{health.L}
++ \beta_6 \,\text{health.Q}
++ \beta_7 \,\text{health.C}
++ \beta_8 \,\text{health}^4 \\[4pt]
+& + \beta_9 \,\text{work}_{\text{Part-time}}
++ \beta_{10} \,\text{work}_{\text{Unemployed}}
++ \beta_{11} \,\text{work}_{\text{Other}} \\[4pt]
+& + \beta_{12} \,\text{vape\_use}_{\text{Yes}}
++ \beta_{13} \,\text{tob\_use}_{\text{Yes}}
++ \beta_{14} \,\text{mj\_use}_{\text{Yes}} + \epsilon \\[4pt]
+\end{aligned}
+\]
+
+\[
+\text{where } 
+\text{logit}\big(P(Y=1 \mid X)\big) 
+= \log\!\left(\frac{P(Y=1 \mid X)}{1 - P(Y=1 \mid X)}\right)
+\]
+\[
+\text{and Y = 1 represents the presence of heavy binge-drinking in the past month}.
+\]
+
+## Model Evaluation
+
+In addition to the survey-weighted logistic regression used for inference and interpretation, a cross-validated, survey-weighted lasso logistic regression model was fit to address the class imbalance between heavy binge drinkers and non–heavy drinkers and to evaluate potential improvements in predictive performance. Under the original survey-weighted model, a Youden-optimal threshold for classifying heavy binge drinking was estimated at 0.05297912, whereas the corresponding threshold for the cross-validated lasso model was 0.3522646. Receiver operating characteristic (ROC) curves were constructed for both models, and each achieved an area under the curve (AUC) of approximately 0.75 (see Figure~\ref{fig:roc-logit}). 
+
+```{r roc-logit, echo=FALSE, fig.cap="ROC curve (left) and confusion matrix (right) for the survey-weighted logistic regression model of heavy binge drinking.",fig.align = 'center', fig.width = 10, fig.height = 3.5, out.width = '\\textwidth'}
+library(pROC)
+library(ggplot2)
+library(dplyr)
+
+# ROC for survey-weighted logistic model
+roc_obj <- roc(nsduh_clean$heavy, fitted(model_final))
+auc_val <- auc(roc_obj)
+
+roc_df <- data.frame(
+  specificity = roc_obj$specificities,
+  sensitivity = roc_obj$sensitivities
+) %>%
+  mutate(FPR = 1 - specificity)
+
+p_roc_logit <- ggplot(roc_df, aes(x = FPR, y = sensitivity)) +
+  geom_line(size = 1.2) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed") +
+  annotate(
+    "text",
+    x = 0.65, y = 0.1,
+    label = paste("AUC =", round(auc_val, 3)),
+    hjust = 0
+  ) +
+  labs(
+    x = "False Positive Rate (1 - Specificity)",
+    y = "True Positive Rate (Sensitivity)",
+    title = "ROC: Survey-weighted logistic model"
+  ) +
+  theme_minimal(base_size = 12)
+
+# Best cutoff (Youden)
+best_coords <- coords(
+  roc_obj,
+  x = "best",
+  best.method = "youden",
+  ret = c("threshold", "sensitivity", "specificity")
+)
+best_thresh <- as.numeric(best_coords["threshold"])
+
+# Predicted probabilities
+pred_prob <- fitted(model_final)
+
+# Keep only complete cases for outcome + prediction
+valid_idx <- which(!is.na(nsduh_clean$heavy) & !is.na(pred_prob))
+y_valid <- nsduh_clean$heavy[valid_idx]
+p_valid <- pred_prob[valid_idx]
+
+levs <- levels(y_valid)
+
+pred_class <- ifelse(
+  p_valid >= best_thresh,
+  levs[2],
+  levs[1]
+)
+
+pred_class <- factor(pred_class, levels = levs)
+
+cm <- table(
+  Observed  = y_valid,
+  Predicted = pred_class
+)
+
+cm_df <- as.data.frame(cm)
+
+p_cm_logit <- ggplot(cm_df, aes(x = Predicted, y = Observed, fill = Freq)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = Freq), size = 4) +
+  scale_fill_gradient(low = "#fde0dd", high = "#c51b8a") +
+  labs(
+    title = paste0(
+      "Confusion matrix (threshold = ",
+      round(best_thresh, 3), ")"
+    ),
+    x = "Predicted class",
+    y = "Observed class",
+    fill = "Count"
+  ) +
+  theme_minimal(base_size = 12)
+
+# Print both plots (side by side via fig.show='hold' + out.width='50%')
+p_roc_logit | p_cm_logit
+
+# Save metrics for later table
+TP <- cm[levs[2], levs[2]]
+TN <- cm[levs[1], levs[1]]
+FP <- cm[levs[1], levs[2]]
+FN <- cm[levs[2], levs[1]]
+
+accuracy    <- (TP + TN) / sum(cm)
+sensitivity <- TP / (TP + FN)
+specificity <- TN / (TN + FP)
+
+metrics_logit <- c(
+  threshold   = best_thresh,
+  accuracy    = accuracy,
+  sensitivity = sensitivity,
+  specificity = specificity,
+  AUC         = as.numeric(auc_val)
+)
+```
+
+
+Thsi cross-validated weighted lasso produced extremely similar AUC, accuracy, sensitivity, and specificity (Table~\ref{tab:model-metrics}). Coefficients from the two models were broadly consistent in direction, with similar patterns of positive and negative associations across predictors. Given the desire to preserve valid inference under the complex survey design and the performance simlarities between the two models, subsequent analyses and interpretation focus on the survey-weighted logistic regression model rather than the cross-validated lasso model.
+
+```{r roc-lasso, echo=FALSE, fig.align="center", fig.cap="ROC curve (left) and confusion matrix (right) for the cross-validated lasso logistic regression model of heavy binge drinking."}
+library(dplyr)
+library(glmnet)
+library(pROC)
+library(caret)
+library(ggplot2)
+
+model_vars <- c(
+  "heavy", "sex", "age_cat", "health", "work_status",
+  "vape_use", "tob_use", "mj_use"
+)
+
+nsduh_model <- nsduh_clean %>%
+  dplyr::select(all_of(model_vars)) %>%
+  tidyr::drop_na()
+
+heavy_fac <- droplevels(as.factor(nsduh_model$heavy))
+tab       <- table(heavy_fac)
+
+pos_level <- names(tab)[which.min(tab)]
+
+nsduh_model <- nsduh_model %>%
+  mutate(heavy_bin = ifelse(heavy_fac == pos_level, 1, 0))
+
+y <- nsduh_model$heavy_bin
+
+X <- model.matrix(
+  heavy_bin ~ sex + age_cat + health + work_status +
+    vape_use + tob_use + mj_use,
+  data = nsduh_model
+)[, -1]
+
+w <- ifelse(y == 1, 10, 1)
+
+set.seed(123)
+cv_lasso <- cv.glmnet(
+  X, y,
+  family  = "binomial",
+  alpha   = 1,
+  weights = w
+)
+
+# Predicted probabilities and ROC
+pred_prob_lasso <- predict(
+  cv_lasso, newx = X, s = "lambda.min",
+  type = "response"
+)
+
+roc_obj_lasso <- roc(y, as.numeric(pred_prob_lasso))
+auc_val_lasso <- auc(roc_obj_lasso)
+
+roc_df_lasso <- data.frame(
+  specificity = roc_obj_lasso$specificities,
+  sensitivity = roc_obj_lasso$sensitivities
+) %>%
+  mutate(FPR = 1 - specificity)
+
+p_roc_lasso <- ggplot(roc_df_lasso, aes(x = FPR, y = sensitivity)) +
+  geom_line(size = 1.2) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed") +
+  annotate(
+    "text",
+    x = 0.65, y = 0.1,
+    label = paste("AUC =", round(auc_val_lasso, 3)),
+    hjust = 0
+  ) +
+  labs(
+    x = "False Positive Rate (1 - Specificity)",
+    y = "True Positive Rate (Sensitivity)",
+    title = "ROC: CV-lasso logistic model"
+  ) +
+  theme_minimal(base_size = 12)
+
+# Best threshold (Youden)
+opt_thresh <- coords(
+  roc_obj_lasso,
+  "best",
+  ret = "threshold"
+)
+
+pred_class_lasso <- ifelse(pred_prob_lasso > opt_thresh[1,1], 1, 0)
+
+cm_lasso <- confusionMatrix(
+  factor(pred_class_lasso, levels = c(0, 1)),
+  factor(y,              levels = c(0, 1))
+)
+
+cm_df_lasso <- as.data.frame(cm_lasso$table)
+
+p_cm_lasso <- ggplot(cm_df_lasso, aes(x = Prediction, y = Reference, fill = Freq)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = Freq), size = 4) +
+  scale_fill_gradient(low = "#e0ecf4", high = "#08519c") +
+  labs(
+    title = paste0(
+      "Confusion matrix (threshold = ",
+      round(opt_thresh[1,1], 3), ")"
+    ),
+    x = "Predicted class",
+    y = "Observed class",
+    fill = "Count"
+  ) +
+  theme_minimal(base_size = 12)
+
+# Extract metrics for table
+accuracy_lasso    <- cm_lasso$overall["Accuracy"]
+sensitivity_lasso <- cm_lasso$byClass["Sensitivity"]
+specificity_lasso <- cm_lasso$byClass["Specificity"]
+
+metrics_lasso <- c(
+  threshold   = opt_thresh[1,1],
+  accuracy    = as.numeric(accuracy_lasso),
+  sensitivity = as.numeric(sensitivity_lasso),
+  specificity = as.numeric(specificity_lasso),
+  AUC         = as.numeric(auc_val_lasso)
+)
+```
+
+```{r model-metrics-table, results="asis"}
+library(dplyr)
+library(knitr)
+
+perf_table <- tibble(
+  Model      = c("Survey-weighted logistic", "CV-lasso logistic"),
+  Threshold  = c(metrics_logit["threshold"],  metrics_lasso["threshold"]),
+  Accuracy   = c(metrics_logit["accuracy"],   metrics_lasso["accuracy"]),
+  Sensitivity= c(metrics_logit["sensitivity"],metrics_lasso["sensitivity"]),
+  Specificity= c(metrics_logit["specificity"],metrics_lasso["specificity"]),
+  AUC        = c(metrics_logit["AUC"],        metrics_lasso["AUC"])
+) %>%
+  mutate(
+    Threshold   = round(as.numeric(Threshold), 3),
+    Accuracy    = round(as.numeric(Accuracy), 3),
+    Sensitivity = round(as.numeric(Sensitivity), 3),
+    Specificity = round(as.numeric(Specificity), 3),
+    AUC         = round(as.numeric(AUC), 3)
+  )
+
+kable(
+  perf_table,
+  format  = "latex",
+  caption = "Classification performance metrics for the survey-weighted logistic regression model and the cross-validated lasso logistic regression model.",
+  label   = "model-metrics",
+  booktabs = TRUE
+)
+```
+
+```{r}
+library(broom)
+library(glmnet)
+library(dplyr)
+library(tidyr)
+library(stringr)
+
+### --- LASSO COEFFICIENTS --- ###
+lasso_coef <- coef(cv_lasso, s = "lambda.min")
+lasso_df <- data.frame(
+  term = rownames(lasso_coef),
+  estimate_lasso = as.numeric(lasso_coef)
+) %>%
+  filter(term != "(Intercept)")
+
+### --- LOGISTIC REGRESSION COEFFICIENTS --- ###
+logit_df <- tidy(model_final) %>%
+  dplyr::select(term, estimate_logit = estimate, p.value)
+
+### Add significance stars
+logit_df <- logit_df %>%
+  mutate(
+    signif = case_when(
+      p.value < 0.001 ~ "***",
+      p.value < 0.01  ~ "**",
+      p.value < 0.05  ~ "*",
+      TRUE ~ ""
+    )
+  )
+
+### --- MERGE TABLES --- ###
+comparison <- logit_df %>%
+  full_join(lasso_df, by = "term") %>%
+  mutate(
+    OR_logit = exp(estimate_logit),
+    OR_lasso = exp(estimate_lasso),
+  ) %>%
+  arrange(term)
+```
+
+
+Because of the rather low prediction accuracy of the model, likely due to the small portion of the study that was identified as having participated in heavy binge drinking, although the models show strong integrity for the interpretation of coefficients to identify trends and patterns, it would not be recommended to use these models in a predictive sense for any one individual. 
+
+# Results
+
+## Key Significant Predictors
+
+\paragraph{Sex.}
+Females had significantly lower odds of heavy alcohol use compared to males (odds ratio [OR] = 0.72, 95\% confidence interval [CI]: 0.63--0.82, $p < 0.001$). This indicates that, holding other factors constant, women are substantially less likely than men to engage in heavy drinking.
+
+\paragraph{Health status.}
+There was a significant negative linear trend across self-reported health categories ($p = 0.0237$). Higher values of the health variable correspond to poorer perceived health, and the OR less than 1 (OR = 0.67, 95\% CI: 0.47--0.97) suggests that individuals reporting worse health had decreased odds of heavy alcohol use.
+
+\paragraph{Work status.}
+Participants in the ``Other'' employment category showed significantly lower odds of heavy alcohol use relative to full-time workers (OR = 0.68, 95\% CI: 0.55--0.85, $p < 0.001$). Neither part-time employment nor unemployment was a significant predictor in the adjusted model.
+
+### Substance use behaviors
+
+Tobacco or nicotine use and marijuana use emerged as the strongest predictors of heavy alcohol consumption. Tobacco use was associated with more than a threefold increase in the odds of heavy drinking (OR = 3.23, 95\% CI: 2.68--3.92, $p < 0.001$). Marijuana use was also strongly associated with higher odds (OR = 2.30, 95\% CI: 1.98--2.68, $p < 0.001$). In contrast, vaping was not significantly associated with heavy alcohol use ($p = 0.73$).
+
+## Non-significant Predictors
+
+Age did not show a significant linear trend, although the point estimate suggested a slight positive association with heavy drinking (OR = 1.11, $p = 0.127$), but it did show a significant non-linear trend, specifically a cubic trend, suggesting a cubic relationship between heavy binge drinking and age. 
+\
+
+Overall, the results indicate that co-occurring substance use (tobacco and marijuana) is the strongest correlate of heavy drinking in this population. Sex, health status, and nonstandard work arrangements also play meaningful roles. Socioeconomic indicators (income, education, and employment status excluding the ``Other'' category) did not show significant associations after controlling for other variables.
+
+```{r or-table, results = "asis"}
+library(broom)
+library(dplyr)
+library(knitr)
+
+# Tidy model output with odds ratios and CIs
+or_table <- tidy(model_final, conf.int = TRUE, exponentiate = TRUE) %>%
+  # Keep only interpretable terms
+  filter(
+    term != "(Intercept)",
+    term != "health.C",
+    term != "health^4"
+  ) %>%
+  mutate(
+    p_value_fmt = format.pval(
+      p.value,
+      digits = 3,
+      eps = 0.0001,
+      scientific = FALSE
+    ),
+    sig = case_when(
+      p.value < 0.001 ~ "***",
+      p.value < 0.01  ~ "**",
+      p.value < 0.05  ~ "*",
+      TRUE            ~ ""
+    )
+  ) %>%
+  # Pretty labels
+  mutate(
+    Label = dplyr::recode(
+      term,
+      "sexFemale"             = "Sex: Female",
+      "age_cat.L"             = "Age Category (linear trend)",
+      "age_cat.Q"             = "Age Category (quadratic trend)",
+      "age_cat.C"             = "Age Category (cubic trend)",
+      "health.L"              = "Health (linear trend)",
+      "health.Q"              = "Health (quadratic trend)",
+      "work_statusPart-time"  = "Work status: Part-time",
+      "work_statusUnemployed" = "Work status: Unemployed",
+      "work_statusOther"      = "Work status: Other",
+      "vape_useYes"           = "Vape use (yes)",
+      "tob_useYes"            = "Tobacco/nicotine use (yes)",
+      "mj_useYes"             = "Marijuana use (yes)",
+      "mde_adultNo"           = "No MDE (past year)",
+      "income.L"              = "Income (linear trend)",
+      "educ.L"                = "Education (linear trend)"
+    )
+  ) %>%
+  dplyr::select(
+    Predictor   = Label,
+    `Odds ratio` = estimate,
+    `95% CI (lower)` = conf.low,
+    `95% CI (upper)` = conf.high,
+    `p-value`   = p_value_fmt,
+    Sig         = sig
+  ) %>%
+  mutate(
+    `Odds ratio`      = round(`Odds ratio`, 2),
+    `95% CI (lower)`  = round(`95% CI (lower)`, 2),
+    `95% CI (upper)`  = round(`95% CI (upper)`, 2)
+  )
+
+kable(
+  or_table,
+  format  = "latex",
+  caption = "Adjusted odds ratios for heavy binge drinking from the survey-weighted logistic regression model.",
+  label   = "or-table",
+  booktabs = TRUE
+)
+
+
+```
+
+```{r forest-or, echo = FALSE, fig.align = "center", out.width = "0.8\\textwidth", fig.cap = "Forest plot of adjusted odds ratios and 95\\% confidence intervals for heavy binge drinking from the survey-weighted logistic regression model."}
+library(broom)
+library(dplyr)
+library(ggplot2)
+
+# Tidy model output with ORs
+or_plot_tbl <- tidy(model_final, conf.int = TRUE, exponentiate = TRUE) %>%
+  filter(
+    term != "(Intercept)",
+    term != "health.C",
+    term != "health^4"
+  )
+
+# Pretty labels
+pretty_labels <- c(
+      "sexFemale"             = "Sex: Female",
+      "age_cat.L"             = "Age Category (linear trend)",
+      "age_cat.Q"             = "Age Category (quadratic trend)",
+      "age_cat.C"             = "Age Category (cubic trend)",
+      "health.L"              = "Health (linear trend)",
+      "health.Q"              = "Health (quadratic trend)",
+      "work_statusPart-time"  = "Work status: Part-time",
+      "work_statusUnemployed" = "Work status: Unemployed",
+      "work_statusOther"      = "Work status: Other",
+      "vape_useYes"           = "Vape use (yes)",
+      "tob_useYes"            = "Tobacco/nicotine use (yes)",
+      "mj_useYes"             = "Marijuana use (yes)",
+      "mde_adultNo"           = "No MDE (past year)",
+      "income.L"              = "Income (linear trend)",
+      "educ.L"                = "Education (linear trend)"
+)
+
+or_plot_tbl <- or_plot_tbl %>%
+  mutate(
+    label = pretty_labels[as.character(term)],
+    # Order factors for plotting (top to bottom)
+    label = factor(label, levels = rev(pretty_labels))
+  )
+
+ggplot(or_plot_tbl, aes(x = label, y = estimate)) +
+  geom_point(size = 3, color = "black") +
+  geom_errorbar(
+    aes(ymin = conf.low, ymax = conf.high),
+    width = 0.2, color = "black"
+  ) +
+  geom_hline(yintercept = 1, linetype = "dashed") +
+  coord_flip() +
+  scale_y_log10() +
+  labs(
+    x = "",
+    y = "Odds ratio (log scale)",
+    title = " Odds ratios for heavy binge drinking"
+  ) +
+  theme_minimal(base_size = 14)
+  
+```
+
+# Conclusion
+
+This study examined demographic, socioeconomic, health, and substance-use–related predictors of heavy alcohol consumption using a multivariable logistic regression model. The findings highlight that co-occurring substance-use behaviors, particularly tobacco use and marijuana use, are the strongest correlates of heavy drinking, even after adjusting for demographic and socioeconomic factors. Females, individuals reporting poorer health, and those in nonstandard work-status categories demonstrated significantly lower odds of heavy alcohol use. Other factors, including income, education, age, depression history, and vaping, were not significant predictors in the adjusted model.
+
+Overall, the model suggests that heavy alcohol consumption is most closely intertwined with other substance-use patterns, reinforcing the importance of integrated prevention efforts that consider clusters of risky behaviors rather than treating alcohol use in isolation.
+
+## Future Directions and Limitations
+
+Although this analysis provides meaningful insight into factors associated with heavy alcohol use, several limitations should be acknowledged. The cross-sectional design prevents conclusions about causality, and unmeasured confounders—such as stress, social environment, or family history—may influence both substance use and drinking behaviors. In addition, some predictors were modeled only as linear trends, which may not fully capture nonlinear or threshold effects. Future studies should explore interaction effects, alternative model structures (e.g., nonlinear or penalized approaches), and longitudinal datasets to better understand temporal relationships between co-occurring substance use and heavy drinking. Incorporating richer psychosocial variables and validating the model in independent populations would further strengthen the generalizability and depth of these findings.
+
+
+# References
+
+- [1] U.S. Department of Health and Human Services, Substance Abuse and Mental Health Services Administration, Center for Behavioral Health Statistics and Quality. (2018). National Survey on Drug Use and Health 2016 (NSDUH-2016-DS0001). Retrieved from https://www.samhsa.gov/data/ 
+- [2] Omary A. Logistic Regression Model of Demographic Predictors and Confounders of Binge Alcohol Use Among Adults with Major Depression. Int J Ment Health Addict. 2022 Apr 28:1-15. doi: 10.1007/s11469-022-00808-y. Epub ahead of print. PMID: 35502437; PMCID: PMC9047467. 
+- [3] Generative AI: As stated, ChatGPT helped with creating data cleaning and EDA functions, as well as just generally troubleshooting all code. Grammarly was used throughout the writing process to grammar check and ensure quality writing. When compiling the final r-markdown file, ChatGPT was used to ensure everything compiled correctly and all figures were referenced correctly. It appears that it changed some wording in the markdown paragraph areas to make it "better" while it was adjusting the formatting, but the entire message is the same as my original work and only wording/style was changed, not content. 
+- [4] Dey D, Haque MS, Islam MM, Aishi UI, Shammy SS, Mayen MSA, Noor STA, Uddin MJ. The proper application of logistic regression model in complex survey data: a systematic review. BMC Med Res Methodol. 2025 Jan 22;25(1):15. doi: 10.1186/s12874-024-02454-5. PMID: 39844030; PMCID: PMC11752662.
